@@ -17,7 +17,6 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 parser = argparse.ArgumentParser(description='Bert Chinese Text Classification')
-parser.add_argument('--model', type=str, default="bert")
 parser.add_argument('--epochs', type=int, default=90)
 parser.add_argument('--batch-size', type=int, default=32)
 parser.add_argument('--learning-rate', type=float, default=5e-5)
@@ -153,7 +152,6 @@ if __name__ == '__main__':
 
     dataset = 'THUCNews'
 
-    model_name = args.model
     config = x.Config(dataset, args.batch_size, args.learning_rate)
     np.random.seed(1)
     torch.manual_seed(1)
