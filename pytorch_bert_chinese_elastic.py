@@ -1,3 +1,4 @@
+
 # coding: UTF-8
 import time
 import torch
@@ -11,16 +12,20 @@ import torch.nn.functional as F
 from sklearn import metrics
 from pytorch_pretrained.optimization import BertAdam
 import torch.multiprocessing as mp
-import models.bert as x
-
+import models.bert_one as x
+import os
 from torch.utils.tensorboard import SummaryWriter
 
 
 parser = argparse.ArgumentParser(description='Bert Chinese Text Classification')
-parser.add_argument('--epochs', type=int, default=90)
+parser.add_argument('--model', type=str, default="bert")
+parser.add_argument('--epochs', type=int, default=5)
 parser.add_argument('--batch-size', type=int, default=32)
 parser.add_argument('--learning-rate', type=float, default=5e-5)
 parser.add_argument('--log-dir', default='./logs')
+parser.add_argument('--batches-per-commit', type=int, default=100)
+parser.add_argument('--batches-per-host-check', type=int, default=10)
+parser.add_argument('--checkpoint-format', default='./checkpoint-{epoch}.pth.tar')
 
 args = parser.parse_args()
 
@@ -42,46 +47,34 @@ def init_network(model, method='xavier', exclude='embedding', seed=123):
             else:
                 pass
 
-def train(state, model, train_iter):
-    start_time = time.time()
+def train(state, train_iter, test_iter):
+    model=state.model
     model.train()
 
     epoch = state.epoch
-    batch_offset = state.batch
-
-    numbers = 0
     train_acc = Metric('train_accuracy')
     train_loss = Metric('train_loss')
 
     for idx, (trains, labels) in enumerate(train_iter):
-
-        state.batch = batch_offset + idx
-        if args.batches_per_commit > 0 and \
-                state.batch % args.batches_per_commit == 0:
-            state.commit()
-        elif args.batches_per_host_check > 0 and \
-                state.batch % args.batches_per_host_check == 0:
-            state.check_host_updates()
-
         optimizer.zero_grad()
+        data_batch = trains
+        labels_batch = labels
+        outputs = model(data_batch)
+        model.zero_grad()
+        loss = F.cross_entropy(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        true = labels_batch.data.cpu()
+        predict = torch.max(outputs.data, 1)[1].cpu()
 
-        for i in range(0, len(trains), args.batch_size):
-            numbers += 1
-            data_batch = trains[i:i + args.batch_size]
-            labels_batch = labels[i:i + args.batch_size]
-            outputs = model(data_batch)
-            model.zero_grad()
-            loss = F.cross_entropy(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            true = labels_batch.data.cpu()
-            predict = torch.max(outputs.data, 1)[1].cpu()
-            train_acc.update(metrics.accuracy_score(true, predict))
-            train_loss.update(loss)
 
-    time_dif = get_time_dif(start_time)
-    msg = 'Epoch: {0:>6},  Train Loss: {1:>5.2},  Train Acc: {2:>6.2%},  Time: {5}'
-    print(msg.format(epoch, train_loss.avg.item(), train_acc.avg.item(), time_dif))
+        train_acc.update(torch.Tensor([np.float32(metrics.accuracy_score(true, predict))])[0])
+        train_loss.update(loss)
+
+        msg = 'Epoch: {0:>6},  Train Loss: {1:>5.2},  Train Acc: {2:>6.2%}'
+        if hvd.rank() == 0:
+            print(msg.format(epoch, train_loss.avg.item(), train_acc.avg.item()))
+        evaluate(model, test_iter, state.epoch)
     model.train()
 
     if log_writer:
@@ -111,10 +104,11 @@ def evaluate(model, data_iter, epoch):
             predict_all = np.append(predict_all, predic)
 
             val_loss.update(loss)
-            val_accuracy.update(metrics.accuracy_score(labels_all, predict_all))
+            val_accuracy.update(torch.Tensor([np.float32(metrics.accuracy_score(labels_all, predict_all))])[0])
 
     msg = 'Epoch: {0:>6},  Val Loss: {1:>5.2},  Val Acc: {2:>6.2%}'
-    print(msg.format(epoch, val_loss.avg.item(), val_accuracy.avg.item()))
+    if hvd.rank() == 0:
+        print(msg.format(epoch, val_loss.avg.item(), val_accuracy.avg.item()))
 
     if log_writer:
         log_writer.add_scalar('val/loss', val_loss.avg, epoch)
@@ -138,20 +132,32 @@ class Metric(object):
 @hvd.elastic.run
 def full_train(state):
     while state.epoch < args.epochs:
-        train(state, model, train_iter)
-        evaluate(state.epoch, test_iter)
+        train(state, train_iter, test_iter)
+        save_checkpoint(state.epoch)
         end_epoch(state)
 
 def end_epoch(state):
     state.epoch += 1
     state.commit()
 
+
+def save_checkpoint(epoch):
+    if hvd.rank() == 0:
+        filepath = args.checkpoint_format.format(epoch=epoch + 1)
+        state = {
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+        }
+        torch.save(state, filepath)
+
+
 if __name__ == '__main__':
 
     hvd.init()
 
-    dataset = 'THUCNews'
+    dataset = '/examples/elastic/pytorch/THUCNews'
 
+    model_name = args.model
     config = x.Config(dataset, args.batch_size, args.learning_rate)
     np.random.seed(1)
     torch.manual_seed(1)
@@ -175,10 +181,6 @@ if __name__ == '__main__':
     print("Time usage:", time_dif)
 
     model = x.Model(config).cuda()
-    kwargs = {'num_workers': 4, 'pin_memory': True} if args.cuda else {}
-    if (kwargs.get('num_workers', 0) > 0 and hasattr(mp, '_supports_context') and
-            mp._supports_context and 'forkserver' in mp.get_all_start_methods()):
-        kwargs['multiprocessing_context'] = 'forkserver'
 
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
     param_optimizer = list(model.named_parameters())
@@ -197,6 +199,19 @@ if __name__ == '__main__':
         backward_passes_per_step=1,
         op=hvd.Average,
         gradient_predivide_factor=1.0)
+
+    resume_from_epoch = 0
+    if hvd.rank() == 0:
+        for try_epoch in range(args.epochs, 0, -1):
+            if os.path.exists(args.checkpoint_format.format(epoch=try_epoch)):
+                resume_from_epoch = try_epoch
+                break
+
+        if resume_from_epoch > 0:
+            filepath = args.checkpoint_format.format(epoch=resume_from_epoch)
+            checkpoint = torch.load(filepath)
+            model.load_state_dict(checkpoint['model'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
 
     state = hvd.elastic.TorchState(model=model,
                                    optimizer=optimizer,
