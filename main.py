@@ -13,6 +13,7 @@ import torch.multiprocessing as mp
 import models.bert_one as x
 import os
 from torch.utils.tensorboard import SummaryWriter
+import time
 
 
 parser = argparse.ArgumentParser(description='Bert Chinese Text Classification')
@@ -52,10 +53,11 @@ def train(state, train_iter, test_iter):
     epoch = state.epoch
     train_acc = Metric('train_accuracy')
     train_loss = Metric('train_loss')
+    train_time = Metric('train_time')
 
     # size = hvd.size()
     # mini_batch = int(args.batch_size / size)
-
+    start = time.process_time()
     for idx, (trains, labels) in enumerate(train_iter):
         # for i in range(0, len(labels), mini_batch):
         #     optimizer.zero_grad()
@@ -96,14 +98,16 @@ def train(state, train_iter, test_iter):
         msg = 'Epoch: {0:>6},  Train Loss: {1:>5.2},  Train Acc: {2:>6.2%}'
         if hvd.rank() == 0:
             print(msg.format(epoch, train_loss.avg.item(), train_acc.avg.item()))
+        if log_writer:
+            log_writer.add_scalar('train/loss', train_loss.avg)
+            log_writer.add_scalar('train/accuracy', train_acc.avg)
+        state.commit()
         evaluate(model, test_iter, state.epoch)
+    end = time.process_time()
+    train_time.update(torch.Tensor([(end - start)])[0])
+    log_writer.add_scalar('time', train_time.avg, state.epoch)
     model.train()
 
-    if log_writer:
-        log_writer.add_scalar('train/loss', train_loss.avg, epoch)
-        log_writer.add_scalar('train/accuracy', train_acc.avg, epoch)
-
-    state.commit()
 
 
 def evaluate(model, data_iter, epoch):
@@ -133,8 +137,8 @@ def evaluate(model, data_iter, epoch):
         print(msg.format(epoch, val_loss.avg.item(), val_accuracy.avg.item()))
 
     if log_writer:
-        log_writer.add_scalar('val/loss', val_loss.avg, epoch)
-        log_writer.add_scalar('val/accuracy', val_accuracy.avg, epoch)
+        log_writer.add_scalar('val/loss', val_loss.avg)
+        log_writer.add_scalar('val/accuracy', val_accuracy.avg)
 
 
 class Metric(object):
@@ -180,7 +184,7 @@ if __name__ == '__main__':
     dataset = '/examples/elastic/pytorch/THUCNews'
 
     model_name = args.model
-    config = x.Config(dataset, int(args.batch_size / hvd.size()), args.learning_rate)
+    config = x.Config(dataset, args.batch_size, args.learning_rate)
     np.random.seed(1)
     torch.manual_seed(1)
     torch.cuda.manual_seed_all(1)
