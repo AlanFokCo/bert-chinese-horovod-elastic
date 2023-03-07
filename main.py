@@ -1,7 +1,5 @@
-import time
 import torch
 import numpy as np
-from importlib import import_module
 import argparse
 from utils import build_dataset, build_iterator, get_time_dif
 import horovod.torch as hvd
@@ -9,12 +7,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sklearn import metrics
 from pytorch_pretrained.optimization import BertAdam
-import torch.multiprocessing as mp
 import models.bert_one as x
 import os
 from torch.utils.tensorboard import SummaryWriter
 import time
-
 
 parser = argparse.ArgumentParser(description='Bert Chinese Text Classification')
 parser.add_argument('--model', type=str, default="bert")
@@ -55,31 +51,8 @@ def train(state, train_iter, test_iter):
     train_loss = Metric('train_loss')
     train_time = Metric('train_time')
 
-    # size = hvd.size()
-    # mini_batch = int(args.batch_size / size)
     start = time.process_time()
     for idx, (trains, labels) in enumerate(train_iter):
-        # for i in range(0, len(labels), mini_batch):
-        #     optimizer.zero_grad()
-        #     data_batch = trains[i:i + mini_batch]
-        #     labels_batch = labels[i:i + mini_batch]
-        #     outputs = model(data_batch)
-        #     model.zero_grad()
-        #     loss = F.cross_entropy(outputs, labels_batch)
-        #     loss.backward()
-        #     optimizer.step()
-        #     true = labels_batch.data.cpu()
-        #     predict = torch.max(outputs.data, 1)[1].cpu()
-
-
-        #     train_acc.update(torch.Tensor([np.float32(metrics.accuracy_score(true, predict))])[0])
-        #     train_loss.update(loss)
-
-        #     msg = 'Epoch: {0:>6},  Train Loss: {1:>5.2},  Train Acc: {2:>6.2%}'
-        #     if hvd.rank() == 0:
-        #         print(msg.format(epoch, train_loss.avg.item(), train_acc.avg.item()))
-        #     evaluate(model, test_iter, state.epoch)
-        #         for i in range(0, len(labels), mini_batch):
         optimizer.zero_grad()
         data_batch = trains
         labels_batch = labels
@@ -105,7 +78,6 @@ def train(state, train_iter, test_iter):
         evaluate(model, test_iter, state.epoch)
     end = time.process_time()
     train_time.update(torch.Tensor([(end - start)])[0])
-    log_writer.add_scalar('time', train_time.avg, state.epoch)
     model.train()
 
 
@@ -180,6 +152,7 @@ def save_checkpoint(epoch):
 if __name__ == '__main__':
 
     hvd.init()
+
 
     dataset = '/examples/elastic/pytorch/THUCNews'
 
