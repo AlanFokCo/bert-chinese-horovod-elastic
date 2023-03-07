@@ -7,7 +7,6 @@ from pytorch_pretrained import BertModel, BertTokenizer
 
 class Config(object):
 
-    """配置参数"""
     def __init__(self, dataset, batch_size, learning_rate):
         self.model_name = 'bert'
         self.train_path = dataset + '/data/train.txt'                                # 训练集
