@@ -1,4 +1,5 @@
 import torch
+import sys
 import numpy as np
 import argparse
 from utils import build_dataset, build_iterator, get_time_dif
@@ -11,7 +12,7 @@ import models.bert_one as x
 import os
 from torch.utils.tensorboard import SummaryWriter
 import time
-import kubeai.handler as kubeai
+import kubeai.elastic as kubeai
 
 parser = argparse.ArgumentParser(description='Bert Chinese Text Classification')
 parser.add_argument('--model', type=str, default="bert")
@@ -66,6 +67,9 @@ def train(state, train_iter, test_iter):
 
         train_acc.update(torch.Tensor([np.float32(metrics.accuracy_score(true, predict))])[0])
         train_loss.update(loss)
+        if kubeai.check_alive() == False:
+            save_checkpoint(state.epoch)
+            sys.exit(-1)
 
         msg = 'Epoch: {0:>6},  Train Loss: {1:>5.2},  Train Acc: {2:>6.2%}'
         if hvd.rank() == 0:
@@ -99,6 +103,9 @@ def evaluate(model, data_iter, epoch):
 
             val_loss.update(loss)
             val_accuracy.update(torch.Tensor([np.float32(metrics.accuracy_score(labels_all, predict_all))])[0])
+            if kubeai.check_alive() == False:
+                save_checkpoint(state.epoch)
+                sys.exit(-1)
 
     msg = 'Epoch: {0:>6},  Val Loss: {1:>5.2},  Val Acc: {2:>6.2%}'
     if hvd.rank() == 0:
